@@ -1415,7 +1415,7 @@ async function configureAnthropicApiKey() {
 
 	const input = await vscode.window.showInputBox({
 		title: 'Configure Anthropic API Key',
-		prompt: 'Enter your Anthropic API key (get one from https://open.bigmodel.cn/)',
+		prompt: 'Enter your Anthropic API key (get one from https://console.anthropic.com/)',
 		value: currentKey ? '••••••••••••••••' : '',
 		password: true,
 		placeHolder: 'Enter your API key...',
