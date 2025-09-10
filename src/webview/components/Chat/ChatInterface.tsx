@@ -65,6 +65,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ layout, vscode }) => {
                 setSelectedModel(message.model || fallbackModel);
             } else if (message.command === 'providerChanged') {
                 setSelectedModel(message.model);
+            } else if (message.command === 'getAvailableModels') {
+                // Forward to ModelSelector component via window message
+                window.postMessage({
+                    command: 'availableModels',
+                    data: {
+                        models: message.models || []
+                    }
+                }, '*');
             }
         };
         

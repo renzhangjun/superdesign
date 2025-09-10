@@ -94,7 +94,18 @@ export function createWriteTool(context: ExecutionContext) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       
         context.outputChannel.appendLine(`[write] Error writing file: ${errorMessage} (${duration}ms)`);
-        return handleToolError(error, 'Write tool execution', 'execution');
+        context.outputChannel.appendLine(`[write] Error details: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`);
+        
+        // Provide more specific error messages
+        if (errorMessage.includes('ENOENT')) {
+            return handleToolError(`Directory does not exist: ${path.dirname(file_path)}`, 'Directory creation', 'execution');
+        } else if (errorMessage.includes('EACCES')) {
+            return handleToolError(`Permission denied: ${file_path}`, 'File permissions', 'permission');
+        } else if (errorMessage.includes('ENOSPC')) {
+            return handleToolError(`No space left on device`, 'Disk space', 'execution');
+        } else {
+            return handleToolError(error, 'Write tool execution', 'execution');
+        }
     }
   }
   });

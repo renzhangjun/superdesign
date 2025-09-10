@@ -12,16 +12,20 @@ interface ModelOption {
     name: string;
     provider: string;
     category: string;
+    description?: string;
 }
 
 const ModelSelector: React.FC<ModelSelectorProps> = ({ selectedModel, onModelChange, disabled }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
     const [dropdownPosition, setDropdownPosition] = useState({ top: 0, left: 0 });
+    const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
+    const [isLoadingModels, setIsLoadingModels] = useState(true);
     const triggerRef = useRef<HTMLButtonElement>(null);
     const modalRef = useRef<HTMLDivElement>(null);
 
-    const models: ModelOption[] = [
+    // Default models as fallback
+    const defaultModels: ModelOption[] = [
         // Anthropic
         { id: 'claude-4-opus-20250514', name: 'Claude 4 Opus', provider: 'Anthropic', category: 'Premium' },
         { id: 'claude-4-sonnet-20250514', name: 'Claude 4 Sonnet', provider: 'Anthropic', category: 'Balanced' },
@@ -55,8 +59,48 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ selectedModel, onModelCha
         { id: 'rekaai/reka-flash-3', name: 'Reka Flash 3', provider: 'OpenRouter (Reka)', category: 'Balanced' },
         // Existing OpenAI (direct)
         { id: 'gpt-4.1', name: 'GPT-4.1', provider: 'OpenAI', category: 'Balanced' },
-        { id: 'gpt-4.1-mini', name: 'GPT-4.1 Mini', provider: 'OpenAI', category: 'Fast' }
+        { id: 'gpt-4.1-mini', name: 'GPT-4.1 Mini', provider: 'OpenAI', category: 'Fast' },
+        
+        // Custom API Model
+        { id: 'custom-model', name: 'Custom Model', provider: 'Custom', category: 'Configurable', description: 'User-configured custom API model' }
     ];
+
+    // Load available models from configuration
+    useEffect(() => {
+        const loadAvailableModels = () => {
+            try {
+                // Request available models from VS Code configuration
+                const vscode = (window as any).acquireVsCodeApi?.();
+                if (vscode) {
+                    vscode.postMessage({
+                        command: 'getAvailableModels'
+                    });
+                }
+            } catch (error) {
+                console.error('Error loading available models:', error);
+                // Fallback to default models
+                setAvailableModels(defaultModels);
+                setIsLoadingModels(false);
+            }
+        };
+
+        loadAvailableModels();
+
+        // Listen for configuration updates
+        const handleMessage = (event: MessageEvent) => {
+            const message = event.data;
+            if (message.command === 'availableModels') {
+                const models = message.data?.models || defaultModels;
+                setAvailableModels(models);
+                setIsLoadingModels(false);
+            }
+        };
+
+        window.addEventListener('message', handleMessage);
+        return () => window.removeEventListener('message', handleMessage);
+    }, []);
+
+    const models = availableModels.length > 0 ? availableModels : defaultModels;
 
     const filteredModels = models.filter(model =>
         model.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -362,12 +406,20 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ selectedModel, onModelCha
                     ref={triggerRef}
                     className="model-selector-trigger"
                     onClick={handleToggleOpen}
-                    disabled={disabled}
+                    disabled={disabled || isLoadingModels}
                 >
                     <div className="selector-icon model-icon">
-                        <BrainIcon />
+                        {isLoadingModels ? (
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <circle cx="12" cy="12" r="10" strokeDasharray="31.416" strokeDashoffset="31.416">
+                                    <animate attributeName="stroke-dashoffset" dur="1s" repeatCount="indefinite" from="31.416" to="0"/>
+                                </circle>
+                            </svg>
+                        ) : (
+                            <BrainIcon />
+                        )}
                     </div>
-                    <span>{selectedModelName}</span>
+                    <span>{isLoadingModels ? 'Loading...' : selectedModelName}</span>
                     <svg 
                         className={`model-selector-arrow ${isOpen ? 'open' : ''}`}
                         width="12" 

@@ -142,8 +142,18 @@ export class ChatMessageService {
                         effectiveProvider = 'openrouter';
                     } else if (specificModel.startsWith('claude-')) {
                         effectiveProvider = 'anthropic';
-                    } else {
+                    } else if (specificModel.startsWith('gpt-')) {
                         effectiveProvider = 'openai';
+                    } else if (specificModel === 'custom-model' || effectiveProvider === 'custom') {
+                        effectiveProvider = 'custom';
+                    } else {
+                        // Check if this is actually a custom model by comparing with customModelName
+                        const customModelName = config.get<string>('customModelName');
+                        if (effectiveProvider === 'custom' || (customModelName && specificModel === customModelName)) {
+                            effectiveProvider = 'custom';
+                        } else {
+                            effectiveProvider = 'openai';
+                        }
                     }
                 }
                 
@@ -159,6 +169,10 @@ export class ChatMessageService {
                     case 'openai':
                         providerName = 'OpenAI';
                         configureCommand = 'superdesign.configureOpenAIApiKey';
+                        break;
+                    case 'custom':
+                        providerName = 'Custom';
+                        configureCommand = 'superdesign.configureCustomApi';
                         break;
                 }
                 

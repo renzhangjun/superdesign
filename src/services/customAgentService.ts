@@ -89,17 +89,69 @@ export class CustomAgentService implements AgentService {
         
         // Determine provider from model name if specific model is set
         let effectiveProvider = provider;
+        const customModelName = config.get<string>('customModelName');
+        
+        if (customModelName) {
+            this.outputChannel.appendLine(`Custom model name configured: ${customModelName}`);
+        }
+        
         if (specificModel) {
             if (specificModel.includes('/')) {
                 effectiveProvider = 'openrouter';
             } else if (specificModel.startsWith('claude-')) {
                 effectiveProvider = 'anthropic';
-            } else {
+            } else if (specificModel.startsWith('gpt-')) {
                 effectiveProvider = 'openai';
+            } else if (specificModel === 'custom-model' || provider === 'custom') {
+                effectiveProvider = 'custom';
+            } else {
+                // Check if this is actually a custom model by comparing with customModelName
+                if (customModelName && specificModel === customModelName) {
+                    effectiveProvider = 'custom';
+                } else {
+                    // Additional check: if provider is custom but model name doesn't match known patterns
+                    // it's likely a custom model
+                    if (provider === 'custom') {
+                        effectiveProvider = 'custom';
+                    } else {
+                        effectiveProvider = 'openai';
+                    }
+                }
             }
         }
         
+        this.outputChannel.appendLine(`Effective provider: ${effectiveProvider}`);
+        
         switch (effectiveProvider) {
+            case 'custom':
+                const customApiUrl = config.get<string>('customApiUrl');
+                const customApiKey = config.get<string>('customApiKey');
+                const customModelName = config.get<string>('customModelName');
+                
+                if (!customApiUrl) {
+                    throw new Error('Custom API URL not configured. Please run "Configure Custom API" command.');
+                }
+                if (!customApiKey) {
+                    throw new Error('Custom API key not configured. Please run "Configure Custom API" command.');
+                }
+                if (!customModelName) {
+                    throw new Error('Custom model name not configured. Please run "Configure Custom API" command.');
+                }
+                
+                this.outputChannel.appendLine(`Custom API URL found: ${customApiUrl}`);
+                this.outputChannel.appendLine(`Custom API key found: ${customApiKey.substring(0, 12)}...`);
+                this.outputChannel.appendLine(`Custom model name: ${customModelName}`);
+                
+                // Use OpenAI SDK for custom API (most compatible)
+                const customOpenAI = createOpenAI({
+                    apiKey: customApiKey,
+                    baseURL: customApiUrl
+                });
+                
+                const customModel = customModelName;
+                this.outputChannel.appendLine(`Using custom model: ${customModel}`);
+                return customOpenAI(customModel);
+                
             case 'openrouter':
                 const openrouterKey = config.get<string>('openrouterApiKey');
                 if (!openrouterKey) {
@@ -895,8 +947,24 @@ I've created the html design, please reveiw and let me know if you need any chan
                 effectiveProvider = 'openrouter';
             } else if (specificModel.startsWith('claude-')) {
                 effectiveProvider = 'anthropic';
-            } else {
+            } else if (specificModel.startsWith('gpt-')) {
                 effectiveProvider = 'openai';
+            } else if (specificModel === 'custom-model' || provider === 'custom') {
+                effectiveProvider = 'custom';
+            } else {
+                // Check if this is actually a custom model by comparing with customModelName
+                const customModelName = config.get<string>('customModelName');
+                if (customModelName && specificModel === customModelName) {
+                    effectiveProvider = 'custom';
+                } else {
+                    // Additional check: if provider is custom but model name doesn't match known patterns
+                    // it's likely a custom model
+                    if (provider === 'custom') {
+                        effectiveProvider = 'custom';
+                    } else {
+                        effectiveProvider = 'openai';
+                    }
+                }
             }
         }
         
@@ -905,6 +973,10 @@ I've created the html design, please reveiw and let me know if you need any chan
                 return !!config.get<string>('openrouterApiKey');
             case 'anthropic':
                 return !!config.get<string>('anthropicApiKey');
+            case 'custom':
+                return !!(config.get<string>('customApiUrl') && 
+                         config.get<string>('customApiKey') && 
+                         config.get<string>('customModelName'));
             case 'openai':
             default:
                 return !!config.get<string>('openaiApiKey');
@@ -923,6 +995,13 @@ I've created the html design, please reveiw and let me know if you need any chan
                lowerError.includes('invalid_api_key') ||
                lowerError.includes('permission_denied') ||
                lowerError.includes('api_key_invalid') ||
-               lowerError.includes('unauthenticated');
+               lowerError.includes('unauthenticated') ||
+               lowerError.includes('custom api') ||  // 添加 custom model 相关错误
+               lowerError.includes('not configured') ||  // 添加配置相关错误
+               lowerError.includes('terminated') ||  // 添加这个特定的错误
+               lowerError.includes('process exited') ||
+               lowerError.includes('exit code') ||
+               lowerError.includes('connection failed') ||
+               lowerError.includes('timeout');
     }
 } 

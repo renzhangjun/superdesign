@@ -90,6 +90,9 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
                     case 'changeProvider':
                         await this.handleChangeProvider(message.model, webviewView.webview);
                         break;
+                    case 'getAvailableModels':
+                        await this.handleGetAvailableModels(webviewView.webview);
+                        break;
                 }
             }
         );
@@ -132,7 +135,19 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
             let configureCommand: string;
             let displayName: string;
             
-            if (model.includes('/')) {
+            // Check if this is a custom model first
+            if (model === 'custom-model') {
+                provider = 'custom';
+                apiKeyKey = 'customApiKey';
+                configureCommand = 'superdesign.configureCustomApi';
+                
+                // Get the actual custom model name from configuration
+                const customModelName = config.get<string>('customModelName', 'custom-model');
+                displayName = `Custom (${this.getModelDisplayName(customModelName)})`;
+                
+                // Use the actual custom model name instead of 'custom-model'
+                model = customModelName;
+            } else if (model.includes('/')) {
                 // OpenRouter model (contains slash like "openai/gpt-4o")
                 provider = 'openrouter';
                 apiKeyKey = 'openrouterApiKey';
@@ -178,6 +193,45 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
 
         } catch (error) {
             vscode.window.showErrorMessage(`Failed to update AI model: ${error}`);
+        }
+    }
+    
+    private async handleGetAvailableModels(webview: vscode.Webview) {
+        try {
+            const config = vscode.workspace.getConfiguration('superdesign');
+            const availableModels = config.get<Array<{
+                id: string;
+                name: string;
+                provider: string;
+                description?: string;
+            }>>('availableModels', []);
+            
+            // If no custom models are configured, use default models
+            if (availableModels.length === 0) {
+                const defaultModels = [
+                    { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', description: 'Latest GPT-4o model' },
+                    { id: 'claude-3-sonnet-20240229', name: 'Claude 3 Sonnet', provider: 'anthropic', description: 'Claude 3 Sonnet model' },
+                    { id: 'anthropic/claude-3-7-sonnet-20250219', name: 'Claude 3.7 Sonnet', provider: 'openrouter', description: 'Claude 3.7 Sonnet via OpenRouter' },
+                    { id: 'custom-model', name: 'Custom Model', provider: 'custom', description: 'User-configured custom API model' }
+                ];
+                
+                webview.postMessage({
+                    command: 'getAvailableModels',
+                    models: defaultModels
+                });
+            } else {
+                webview.postMessage({
+                    command: 'getAvailableModels',
+                    models: availableModels
+                });
+            }
+        } catch (error) {
+            console.error('Error getting available models:', error);
+            // Send empty array as fallback
+            webview.postMessage({
+                command: 'getAvailableModels',
+                models: []
+            });
         }
     }
     
@@ -332,7 +386,9 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
             'inflection/inflection-3-productivity': 'Inflection 3 Productivity',
             'inflection/inflection-3-pi': 'Inflection 3 Pi',
             'rekaai/reka-flash-3': 'Reka Flash 3',
-            'openrouter/auto': 'Auto (Best Available)'
+            'openrouter/auto': 'Auto (Best Available)',
+            // Custom Model
+            'custom-model': 'Custom Model'
         };
         
         return modelNames[model] || model;

@@ -1329,6 +1329,11 @@ export function activate(context: vscode.ExtensionContext) {
 		await configureAnthropicApiKey();
 	});
 
+	// Register configure custom API command
+	const configureCustomApiDisposable = vscode.commands.registerCommand('superdesign.configureCustomApi', async () => {
+		await configureCustomApi();
+	});
+
 	// Set up message handler for auto-canvas functionality
 	sidebarProvider.setMessageHandler((message) => {
 		switch (message.command) {
@@ -1399,7 +1404,8 @@ export function activate(context: vscode.ExtensionContext) {
 		resetWelcomeDisposable,
 		initializeProjectDisposable,
 		openSettingsDisposable,
-		configureApiKeyQuickDisposable
+		configureApiKeyQuickDisposable,
+		configureCustomApiDisposable
 	);
 }
 
@@ -1409,10 +1415,10 @@ async function configureAnthropicApiKey() {
 
 	const input = await vscode.window.showInputBox({
 		title: 'Configure Anthropic API Key',
-		prompt: 'Enter your Anthropic API key (get one from https://console.anthropic.com/)',
+		prompt: 'Enter your Anthropic API key (get one from https://open.bigmodel.cn/)',
 		value: currentKey ? '••••••••••••••••' : '',
 		password: true,
-		placeHolder: 'sk-ant-...',
+		placeHolder: 'Enter your API key...',
 		validateInput: (value) => {
 			if (!value || value.trim().length === 0) {
 				return 'API key cannot be empty';
@@ -1420,8 +1426,8 @@ async function configureAnthropicApiKey() {
 			if (value === '••••••••••••••••') {
 				return null; // User didn't change the masked value, that's OK
 			}
-			if (!value.startsWith('sk-ant-')) {
-				return 'Anthropic API keys should start with "sk-ant-"';
+			if (!value.startsWith('sk-')) {
+				return 'API keys should start with "sk-"';
 			}
 			return null;
 		}
@@ -1535,6 +1541,95 @@ async function configureOpenRouterApiKey() {
 		} else {
 			vscode.window.showWarningMessage('No API key was set');
 		}
+	}
+}
+
+// Function to configure Custom API
+async function configureCustomApi() {
+	const config = vscode.workspace.getConfiguration('superdesign');
+	
+	// Get current values
+	const currentApiUrl = config.get<string>('customApiUrl');
+	const currentApiKey = config.get<string>('customApiKey');
+	const currentModelName = config.get<string>('customModelName');
+
+	// Step 1: Configure API URL
+	const apiUrl = await vscode.window.showInputBox({
+		title: 'Configure Custom API URL',
+		prompt: 'Enter your custom API URL (e.g., https://api.example.com/v1)',
+		value: currentApiUrl || '',
+		placeHolder: 'https://api.example.com/v1',
+		validateInput: (value) => {
+			if (!value || value.trim().length === 0) {
+				return 'API URL cannot be empty';
+			}
+			try {
+				new URL(value);
+				return null;
+			} catch {
+				return 'Please enter a valid URL';
+			}
+		}
+	});
+
+	if (apiUrl === undefined) {
+		return; // User cancelled
+	}
+
+	// Step 2: Configure API key
+	const apiKey = await vscode.window.showInputBox({
+		title: 'Configure Custom API Key',
+		prompt: 'Enter your custom API key',
+		value: currentApiKey ? '••••••••••••••••' : '',
+		password: true,
+		placeHolder: 'Enter your API key...',
+		validateInput: (value) => {
+			if (!value || value.trim().length === 0) {
+				return 'API key cannot be empty';
+			}
+			if (value === '••••••••••••••••') {
+				return null; // User didn't change the masked value, that's OK
+			}
+			return null;
+		}
+	});
+
+	if (apiKey === undefined) {
+		return; // User cancelled
+	}
+
+	// Step 3: Configure model name
+	const modelName = await vscode.window.showInputBox({
+		title: 'Configure Custom Model Name',
+		prompt: 'Enter your custom model name (e.g., gpt-4, claude-3-sonnet)',
+		value: currentModelName || '',
+		placeHolder: 'Enter model name...',
+		validateInput: (value) => {
+			if (!value || value.trim().length === 0) {
+				return 'Model name cannot be empty';
+			}
+			return null;
+		}
+	});
+
+	if (modelName === undefined) {
+		return; // User cancelled
+	}
+
+	try {
+		// Update all settings
+		await Promise.all([
+			config.update('customApiUrl', apiUrl.trim(), vscode.ConfigurationTarget.Global),
+			config.update('customApiKey', apiKey !== '••••••••••••••••' ? apiKey.trim() : currentApiKey, vscode.ConfigurationTarget.Global),
+			config.update('customModelName', modelName.trim(), vscode.ConfigurationTarget.Global)
+		]);
+
+		// Set the provider to custom
+		await config.update('aiModelProvider', 'custom', vscode.ConfigurationTarget.Global);
+
+		vscode.window.showInformationMessage('✅ Custom API configured successfully!');
+	} catch (error) {
+		vscode.window.showErrorMessage(`Failed to save custom API configuration: ${error}`);
 	}
 }
 
