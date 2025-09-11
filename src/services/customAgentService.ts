@@ -7,6 +7,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { AgentService, ExecutionContext } from '../types/agent';
+import { Logger, LogLevel } from './logger';
 import { createReadTool } from '../tools/read-tool';
 import { createWriteTool } from '../tools/write-tool';
 import { createBashTool } from '../tools/bash-tool';
@@ -95,27 +96,31 @@ export class CustomAgentService implements AgentService {
             this.outputChannel.appendLine(`Custom model name configured: ${customModelName}`);
         }
         
+        // Check if we have custom API configuration first
+        const hasCustomApiConfig = config.get<string>('customApiUrl') && 
+                                   config.get<string>('customApiKey') && 
+                                   config.get<string>('customModelName');
+        
         if (specificModel) {
-            if (specificModel.includes('/')) {
+            // If custom API is configured and the model matches the custom model name, use custom provider
+            if (hasCustomApiConfig && customModelName && specificModel === customModelName) {
+                effectiveProvider = 'custom';
+            } else if (specificModel.includes('/')) {
                 effectiveProvider = 'openrouter';
             } else if (specificModel.startsWith('claude-')) {
+                // Only use Anthropic provider if not a custom model
                 effectiveProvider = 'anthropic';
             } else if (specificModel.startsWith('gpt-')) {
                 effectiveProvider = 'openai';
             } else if (specificModel === 'custom-model' || provider === 'custom') {
                 effectiveProvider = 'custom';
             } else {
-                // Check if this is actually a custom model by comparing with customModelName
-                if (customModelName && specificModel === customModelName) {
+                // Additional check: if provider is custom but model name doesn't match known patterns
+                // it's likely a custom model
+                if (provider === 'custom') {
                     effectiveProvider = 'custom';
                 } else {
-                    // Additional check: if provider is custom but model name doesn't match known patterns
-                    // it's likely a custom model
-                    if (provider === 'custom') {
-                        effectiveProvider = 'custom';
-                    } else {
-                        effectiveProvider = 'openai';
-                    }
+                    effectiveProvider = 'openai';
                 }
             }
         }
@@ -623,6 +628,9 @@ I've created the html design, please reveiw and let me know if you need any chan
     ): Promise<any[]> {
         this.outputChannel.appendLine('=== CUSTOM AGENT QUERY CALLED ===');
         
+        // 启用DEBUG级别日志记录
+        Logger.setLevel(LogLevel.DEBUG);
+        
         // Determine which input format we're using
         const usingConversationHistory = !!conversationHistory && conversationHistory.length > 0;
         
@@ -706,9 +714,36 @@ I've created the html design, please reveiw and let me know if you need any chan
             const result = streamText(streamTextConfig);
 
             this.outputChannel.appendLine('AI SDK streamText created, starting to process chunks...');
-
+            Logger.debug('AI SDK streamText created, preparing to process chunks');
             
+            // 添加调试信息 - 输出模型配置
+            const config = vscode.workspace.getConfiguration('superdesign');
+            const provider = config.get<string>('aiModelProvider', 'anthropic');
+            const model = config.get<string>('aiModel');
+            Logger.debug(`Current model configuration - Provider: ${provider}, Model: ${model}`);
+            
+            // 添加超时监控
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('Request timeout after 60 seconds')), 60000);
+            });
 
+            // 添加自定义API健康检查
+            const customProvider = config.get<string>('aiModelProvider', 'anthropic');
+            if (customProvider === 'custom') {
+                const customApiUrl = config.get<string>('customApiUrl');
+                const customApiKey = config.get<string>('customApiKey');
+                if (customApiUrl && customApiKey) {
+                    const isHealthy = await this.checkApiHealth(customApiUrl, customApiKey);
+                    if (!isHealthy) {
+                        this.outputChannel.appendLine('Custom API health check failed');
+                        throw new Error('Custom API service appears to be unavailable or misconfigured');
+                    }
+                }
+            }
+
+            // 处理流式响应
+            this.outputChannel.appendLine('Starting to process stream chunks...');
+            
             for await (const chunk of result.fullStream) {
                 // Check for abort signal
                 if (abortController?.signal.aborted) {
@@ -719,186 +754,204 @@ I've created the html design, please reveiw and let me know if you need any chan
                 this.outputChannel.appendLine(`Received chunk type: ${chunk.type}`);
 
                 switch (chunk.type) {
-                    case 'text-delta':
-                        // Handle streaming text (assistant message chunks) - CoreMessage format
-                        messageBuffer += chunk.textDelta;
-                        
-                        const textMessage: CoreMessage = {
-                            role: 'assistant',
-                            content: chunk.textDelta
-                        };
-                        
-                        onMessage?.(textMessage);
-                        responseMessages.push(textMessage);
+                case 'text-delta':
+                    // Handle streaming text (assistant message chunks) - CoreMessage format
+                    if (!chunk.textDelta || chunk.textDelta.trim() === '') {
+                        this.outputChannel.appendLine('Warning: Received empty text delta');
                         break;
+                    }
+                    
+                    messageBuffer += chunk.textDelta;
+                    
+                    const textMessage: CoreMessage = {
+                        role: 'assistant',
+                        content: chunk.textDelta
+                    };
+                    
+                    onMessage?.(textMessage);
+                    responseMessages.push(textMessage);
+                    break;
 
-                    case 'finish':
-                        // Final result message - CoreMessage format
-                        this.outputChannel.appendLine(`===Stream finished with reason: ${chunk.finishReason}`);
-                        this.outputChannel.appendLine(`${JSON.stringify(chunk)}`);
-                        this.outputChannel.appendLine(`========================================`);
-                        
-                        const resultMessage: CoreMessage = {
-                            role: 'assistant',
-                            content: chunk.finishReason === 'stop' ? 'Response completed successfully' : 'Response completed'
-                        };
-                        
-                        onMessage?.(resultMessage);
-                        responseMessages.push(resultMessage);
-                        break;
+                case 'finish':
+                    // Final result message - CoreMessage format
+                    this.outputChannel.appendLine(`===Stream finished with reason: ${chunk.finishReason}`);
+                    this.outputChannel.appendLine(`${JSON.stringify(chunk)}`);
+                    this.outputChannel.appendLine(`========================================`);
+                    
+                    // 检查是否有错误信息
+                    const responseHeaders = (chunk as any).response?.headers || {};
+                    const tengineError = responseHeaders['x-tengine-error'];
+                    
+                    let resultContent = 'Response completed';
+                    if (tengineError) {
+                        this.outputChannel.appendLine(`⚠️ Server returned error: ${tengineError}`);
+                        resultContent = `⚠️ API Error: The server returned an error (${tengineError}). This may indicate:\n- API key permission issues\n- Rate limiting\n- Server restrictions\n\nPlease check your API configuration or try a different model.`;
+                    } else if (chunk.finishReason === 'unknown') {
+                        this.outputChannel.appendLine('⚠️ Stream finished with unknown reason - may indicate an error');
+                        resultContent = '⚠️ The request completed but no content was generated. This may indicate an API configuration issue.';
+                    }
+                    
+                    const resultMessage: CoreMessage = {
+                        role: 'assistant',
+                        content: resultContent
+                    };
+                    
+                    onMessage?.(resultMessage);
+                    responseMessages.push(resultMessage);
+                    break;
 
-                    case 'error':
-                        // Error handling - CoreMessage format
-                        const errorMsg = (chunk as any).error?.message || 'Unknown error occurred';
-                        this.outputChannel.appendLine(`Stream error: ${errorMsg}`);
-                        
-                        const errorMessage: CoreMessage = {
-                            role: 'assistant',
-                            content: `Error: ${errorMsg}`
-                        };
-                        
-                        onMessage?.(errorMessage);
-                        responseMessages.push(errorMessage);
-                        break;
+                case 'error':
+                    // Error handling - CoreMessage format
+                    const errorMsg = (chunk as any).error?.message || 'Unknown error occurred';
+                    this.outputChannel.appendLine(`Stream error: ${errorMsg}`);
+                    
+                    const errorMessage: CoreMessage = {
+                        role: 'assistant',
+                        content: `Error: ${errorMsg}`
+                    };
+                    
+                    onMessage?.(errorMessage);
+                    responseMessages.push(errorMessage);
+                    break;
 
-                    case 'tool-call-streaming-start':
-                        // Tool call streaming started - CoreAssistantMessage format
-                        const streamStart = chunk as any;
-                        currentToolCall = {
+                case 'tool-call-streaming-start':
+                    // Tool call streaming started - CoreAssistantMessage format
+                    const streamStart = chunk as any;
+                    currentToolCall = {
+                        toolCallId: streamStart.toolCallId,
+                        toolName: streamStart.toolName,
+                        args: {}
+                    };
+                    toolCallBuffer = '';
+                    
+                    this.outputChannel.appendLine(`Tool call streaming started: ${streamStart.toolName} (ID: ${streamStart.toolCallId})`);
+                    
+                    // Send initial tool call message in CoreAssistantMessage format
+                    const toolCallStartMessage: CoreMessage = {
+                        role: 'assistant',
+                        content: [{
+                            type: 'tool-call',
                             toolCallId: streamStart.toolCallId,
                             toolName: streamStart.toolName,
-                            args: {}
-                        };
-                        toolCallBuffer = '';
-                        
-                        this.outputChannel.appendLine(`Tool call streaming started: ${streamStart.toolName} (ID: ${streamStart.toolCallId})`);
-                        
-                        // Send initial tool call message in CoreAssistantMessage format
-                        const toolCallStartMessage: CoreMessage = {
-                            role: 'assistant',
-                            content: [{
-                                type: 'tool-call',
-                                toolCallId: streamStart.toolCallId,
-                                toolName: streamStart.toolName,
-                                args: {} // Empty initially, will be updated with deltas
-                            }]
-                        };
-                        
-                        onMessage?.(toolCallStartMessage);
-                        responseMessages.push(toolCallStartMessage);
-                        break;
+                            args: {} // Empty initially, will be updated with deltas
+                        }]
+                    };
+                    
+                    onMessage?.(toolCallStartMessage);
+                    responseMessages.push(toolCallStartMessage);
+                    break;
 
-                    case 'tool-call-delta':
-                        // Streaming tool call parameters - update existing message
-                        const delta = chunk as any;
-                        if (currentToolCall && delta.argsTextDelta) {
-                            toolCallBuffer += delta.argsTextDelta;
+                case 'tool-call-delta':
+                    // Streaming tool call parameters - update existing message
+                    const delta = chunk as any;
+                    if (currentToolCall && delta.argsTextDelta) {
+                        toolCallBuffer += delta.argsTextDelta;
+                        
+                        // Try to parse current buffer as JSON and send update
+                        try {
+                            const parsedArgs = JSON.parse(toolCallBuffer);
                             
-                            // Try to parse current buffer as JSON and send update
-                            try {
-                                const parsedArgs = JSON.parse(toolCallBuffer);
-                                
-                                // Send UPDATE signal (not new message) with special marker
-                                const updateMessage: CoreMessage & { _isUpdate?: boolean, _updateToolId?: string } = {
-                                    role: 'assistant',
-                                    content: [{
-                                        type: 'tool-call',
-                                        toolCallId: currentToolCall.toolCallId,
-                                        toolName: currentToolCall.toolName,
-                                        args: parsedArgs
-                                    }],
-                                    _isUpdate: true,
-                                    _updateToolId: currentToolCall.toolCallId
-                                };
-                                
-                                onMessage?.(updateMessage);
-                                
-                            } catch (parseError) {
-                                // JSON not complete yet, continue buffering
-                                if (toolCallBuffer.length % 100 === 0) {
-                                    this.outputChannel.appendLine(`Tool call progress: ${toolCallBuffer.length} characters received (parsing...)`);
-                                }
-                            }
-                        }
-                        break;
-
-                    case 'tool-call':
-                        // Handle final complete tool call - CoreAssistantMessage format
-                        const toolCall = chunk as any;
-                        this.outputChannel.appendLine(`=====Tool call complete: ${JSON.stringify(toolCall)}`);
-                        this.outputChannel.appendLine(`========================================`);
-                        
-                        // Skip sending duplicate tool call message if we already sent streaming start
-                        if (!currentToolCall) {
-                            // Only send if we didn't already send a streaming start message
-                            const toolCallMessage: CoreMessage = {
+                            // Send UPDATE signal (not new message) with special marker
+                            const updateMessage: CoreMessage & { _isUpdate?: boolean, _updateToolId?: string } = {
                                 role: 'assistant',
                                 content: [{
                                     type: 'tool-call',
-                                    toolCallId: toolCall.toolCallId,
-                                    toolName: toolCall.toolName,
-                                    args: toolCall.args
-                                }]
+                                    toolCallId: currentToolCall.toolCallId,
+                                    toolName: currentToolCall.toolName,
+                                    args: parsedArgs
+                                }],
+                                _isUpdate: true,
+                                _updateToolId: currentToolCall.toolCallId
                             };
                             
-                            onMessage?.(toolCallMessage);
-                            responseMessages.push(toolCallMessage);
-                        } else {
-                            this.outputChannel.appendLine(`Skipping duplicate tool call message - already sent streaming start for ID: ${toolCall.toolCallId}`);
+                            onMessage?.(updateMessage);
+                            
+                        } catch (parseError) {
+                            // JSON not complete yet, continue buffering
+                            if (toolCallBuffer.length % 100 === 0) {
+                                this.outputChannel.appendLine(`Tool call progress: ${toolCallBuffer.length} characters received (parsing...)`);
+                            }
                         }
+                    }
+                    break;
+
+                case 'tool-call':
+                    // Handle final complete tool call - CoreAssistantMessage format
+                    const toolCall = chunk as any;
+                    this.outputChannel.appendLine(`=====Tool call complete: ${JSON.stringify(toolCall)}`);
+                    this.outputChannel.appendLine(`========================================`);
+                    
+                    // Skip sending duplicate tool call message if we already sent streaming start
+                    if (!currentToolCall) {
+                        // Only send if we didn't already send a streaming start message
+                        const toolCallMessage: CoreMessage = {
+                            role: 'assistant',
+                            content: [{
+                                type: 'tool-call',
+                                toolCallId: toolCall.toolCallId,
+                                toolName: toolCall.toolName,
+                                args: toolCall.args
+                            }]
+                        };
                         
-                        // Reset tool call streaming state
-                        currentToolCall = null;
-                        toolCallBuffer = '';
-                        break;
+                        onMessage?.(toolCallMessage);
+                        responseMessages.push(toolCallMessage);
+                    } else {
+                        this.outputChannel.appendLine(`Skipping duplicate tool call message - already sent streaming start for ID: ${toolCall.toolCallId}`);
+                    }
+                    
+                    // Reset tool call streaming state
+                    currentToolCall = null;
+                    toolCallBuffer = '';
+                    break;
 
-                    case 'step-start':
-                        // Log step start with details
-                        const stepStart = chunk as any;
-                        this.outputChannel.appendLine(`====Step ${stepStart.step || 'unknown'} started: ${stepStart.stepType || 'reasoning'}`);
-                        this.outputChannel.appendLine(`${JSON.stringify(chunk)}`);
-                        this.outputChannel.appendLine(`========================================`);
-                        break;
+                case 'step-start':
+                    // Log step start with details
+                    const stepStart = chunk as any;
+                    this.outputChannel.appendLine(`====Step ${stepStart.step || 'unknown'} started: ${stepStart.stepType || 'reasoning'}`);
+                    this.outputChannel.appendLine(`${JSON.stringify(chunk)}`);
+                    this.outputChannel.appendLine(`========================================`);
+                    break;
 
-                    case 'step-finish':
-                        // Log step completion with details
-                        const stepFinish = chunk as any;
-                        this.outputChannel.appendLine(`====Step ${stepFinish.step || 'unknown'} finished: ${stepFinish.stepType || 'reasoning'} (${stepFinish.finishReason || 'completed'})`);
-                        this.outputChannel.appendLine(`${JSON.stringify(chunk)}`);
-                        this.outputChannel.appendLine(`========================================`);
-                        break;
+                case 'step-finish':
+                    // Log step completion with details
+                    const stepFinish = chunk as any;
+                    this.outputChannel.appendLine(`====Step ${stepFinish.step || 'unknown'} finished: ${stepFinish.stepType || 'reasoning'} (${stepFinish.finishReason || 'completed'})`);
+                    this.outputChannel.appendLine(`${JSON.stringify(chunk)}`);
+                    this.outputChannel.appendLine(`========================================`);
+                    break;
 
-                    default:
-                        // Handle tool results and other unknown chunk types
-                        if ((chunk as any).type === 'tool-result') {
-                            const toolResult = chunk as any;
-                            this.outputChannel.appendLine(`Tool result received for ID: ${toolResult.toolCallId}: ${JSON.stringify(toolResult.result).substring(0, 200)}...`);
-                            
-                            // Send tool result in CoreToolMessage format
-                            const toolResultMessage: CoreMessage = {
-                                role: 'tool',
-                                content: [{
-                                    type: 'tool-result',
-                                    toolCallId: toolResult.toolCallId,
-                                    toolName: toolResult.toolName,
-                                    result: toolResult.result,
-                                    isError: toolResult.isError || false
-                                }]
-                            };
-                            
-                            onMessage?.(toolResultMessage);
-                            responseMessages.push(toolResultMessage);
-                        } else {
-                            this.outputChannel.appendLine(`Unknown chunk type: ${chunk.type}`);
-                        }
-                        break;
-                }
+                default:
+                    // Handle tool results and other unknown chunk types
+                    if ((chunk as any).type === 'tool-result') {
+                        const toolResult = chunk as any;
+                        this.outputChannel.appendLine(`Tool result received for ID: ${toolResult.toolCallId}: ${JSON.stringify(toolResult.result).substring(0, 200)}...`);
+                        
+                        // Send tool result in CoreToolMessage format
+                        const toolResultMessage: CoreMessage = {
+                            role: 'tool',
+                            content: [{
+                                type: 'tool-result',
+                                toolCallId: toolResult.toolCallId,
+                                toolName: toolResult.toolName,
+                                result: toolResult.result,
+                                isError: toolResult.isError || false
+                            }]
+                        };
+                        
+                        onMessage?.(toolResultMessage);
+                        responseMessages.push(toolResultMessage);
+                    } else {
+                        this.outputChannel.appendLine(`Unknown chunk type: ${chunk.type}`);
+                    }
+                    break;
             }
+        }
 
-            this.outputChannel.appendLine(`Query completed successfully. Total messages: ${responseMessages.length}`);
-            this.outputChannel.appendLine(`Complete response: "${messageBuffer}"`);
-            
-            return responseMessages;
+        this.outputChannel.appendLine(`Query completed successfully. Total messages: ${responseMessages.length}`);
+        this.outputChannel.appendLine(`Complete response: "${messageBuffer}"`);
+        
+        return responseMessages;
 
         } catch (error) {
             this.outputChannel.appendLine(`Custom Agent query failed: ${error}`);
@@ -940,30 +993,34 @@ I've created the html design, please reveiw and let me know if you need any chan
         const specificModel = config.get<string>('aiModel');
         const provider = config.get<string>('aiModelProvider', 'anthropic');
         
+        // Check if we have custom API configuration first
+        const customModelName = config.get<string>('customModelName');
+        const hasCustomApiConfig = config.get<string>('customApiUrl') && 
+                                   config.get<string>('customApiKey') && 
+                                   config.get<string>('customModelName');
+        
         // Determine provider from model name if specific model is set
         let effectiveProvider = provider;
         if (specificModel) {
-            if (specificModel.includes('/')) {
+            // If custom API is configured and the model matches the custom model name, use custom provider
+            if (hasCustomApiConfig && customModelName && specificModel === customModelName) {
+                effectiveProvider = 'custom';
+            } else if (specificModel.includes('/')) {
                 effectiveProvider = 'openrouter';
             } else if (specificModel.startsWith('claude-')) {
+                // Only use Anthropic provider if not a custom model
                 effectiveProvider = 'anthropic';
             } else if (specificModel.startsWith('gpt-')) {
                 effectiveProvider = 'openai';
             } else if (specificModel === 'custom-model' || provider === 'custom') {
                 effectiveProvider = 'custom';
             } else {
-                // Check if this is actually a custom model by comparing with customModelName
-                const customModelName = config.get<string>('customModelName');
-                if (customModelName && specificModel === customModelName) {
+                // Additional check: if provider is custom but model name doesn't match known patterns
+                // it's likely a custom model
+                if (provider === 'custom') {
                     effectiveProvider = 'custom';
                 } else {
-                    // Additional check: if provider is custom but model name doesn't match known patterns
-                    // it's likely a custom model
-                    if (provider === 'custom') {
-                        effectiveProvider = 'custom';
-                    } else {
-                        effectiveProvider = 'openai';
-                    }
+                    effectiveProvider = 'openai';
                 }
             }
         }
@@ -989,7 +1046,9 @@ I've created the html design, please reveiw and let me know if you need any chan
         }
         
         const lowerError = errorMessage.toLowerCase();
-        return lowerError.includes('api key') ||
+        Logger.debug(`Checking if error is API auth error: "${errorMessage}"`);
+        
+        const isAuthError = lowerError.includes('api key') ||
                lowerError.includes('authentication') ||
                lowerError.includes('unauthorized') ||
                lowerError.includes('invalid_api_key') ||
@@ -1002,6 +1061,48 @@ I've created the html design, please reveiw and let me know if you need any chan
                lowerError.includes('process exited') ||
                lowerError.includes('exit code') ||
                lowerError.includes('connection failed') ||
-               lowerError.includes('timeout');
+               lowerError.includes('timeout') ||
+               lowerError.includes('model not found') ||  // 模型不存在
+               lowerError.includes('invalid model') ||  // 无效模型
+               lowerError.includes('model unavailable') ||  // 模型不可用
+               lowerError.includes('rate limit') ||  // 速率限制
+               lowerError.includes('quota exceeded') ||  // 配额超限
+               lowerError.includes('billing') ||  // 计费问题
+               lowerError.includes('payment');  // 支付问题
+               
+        Logger.debug(`Is auth error: ${isAuthError}`);
+        return isAuthError;
+    }
+
+    private async checkApiHealth(apiUrl: string, apiKey: string): Promise<boolean> {
+        try {
+            this.outputChannel.appendLine(`Checking API health for: ${apiUrl}`);
+            
+            // 尝试获取模型列表作为健康检查
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
+            
+            const response = await fetch(`${apiUrl}/models`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                signal: controller.signal
+            });
+            
+            clearTimeout(timeoutId);
+            
+            if (response.ok) {
+                this.outputChannel.appendLine('API health check passed');
+                return true;
+            } else {
+                this.outputChannel.appendLine(`API health check failed with status: ${response.status}`);
+                return false;
+            }
+        } catch (error) {
+            this.outputChannel.appendLine(`API health check error: ${error}`);
+            return false;
+        }
     }
 } 

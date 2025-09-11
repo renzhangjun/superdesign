@@ -135,18 +135,24 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
             let configureCommand: string;
             let displayName: string;
             
+            // Check if we have custom API configuration first
+            const customModelName = config.get<string>('customModelName');
+            const hasCustomApiConfig = config.get<string>('customApiUrl') && 
+                                       config.get<string>('customApiKey') && 
+                                       config.get<string>('customModelName');
+            
             // Check if this is a custom model first
-            if (model === 'custom-model') {
+            if (model === 'custom-model' || (hasCustomApiConfig && customModelName && model === customModelName)) {
                 provider = 'custom';
                 apiKeyKey = 'customApiKey';
                 configureCommand = 'superdesign.configureCustomApi';
                 
                 // Get the actual custom model name from configuration
-                const customModelName = config.get<string>('customModelName', 'custom-model');
-                displayName = `Custom (${this.getModelDisplayName(customModelName)})`;
+                const actualCustomModelName = config.get<string>('customModelName', 'custom-model');
+                displayName = `Custom (${this.getModelDisplayName(actualCustomModelName)})`;
                 
                 // Use the actual custom model name instead of 'custom-model'
-                model = customModelName;
+                model = actualCustomModelName;
             } else if (model.includes('/')) {
                 // OpenRouter model (contains slash like "openai/gpt-4o")
                 provider = 'openrouter';
@@ -154,6 +160,7 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
                 configureCommand = 'superdesign.configureOpenRouterApiKey';
                 displayName = `OpenRouter (${this.getModelDisplayName(model)})`;
             } else if (model.startsWith('claude-')) {
+                // Only use Anthropic provider if not a custom model
                 provider = 'anthropic';
                 apiKeyKey = 'anthropicApiKey';
                 configureCommand = 'superdesign.configureApiKey';
@@ -170,7 +177,23 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
             await config.update('aiModel', model, vscode.ConfigurationTarget.Global);
             
             // Check if the API key is configured for the selected provider
-            const apiKey = config.get<string>(apiKeyKey);
+            let apiKey: string | undefined;
+            
+            if (provider === 'custom') {
+                // For custom provider, check all required configuration
+                const customApiUrl = config.get<string>('customApiUrl');
+                const customApiKey = config.get<string>('customApiKey');
+                const customModelName = config.get<string>('customModelName');
+                
+                if (!customApiUrl || !customApiKey || !customModelName) {
+                    apiKey = undefined; // Missing configuration
+                } else {
+                    apiKey = customApiKey; // Configuration exists
+                }
+            } else {
+                // For other providers, check only the API key
+                apiKey = config.get<string>(apiKeyKey);
+            }
             
             if (!apiKey) {
                 const result = await vscode.window.showWarningMessage(
