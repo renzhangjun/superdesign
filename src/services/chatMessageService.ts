@@ -138,22 +138,25 @@ export class ChatMessageService {
                 let configureCommand = 'superdesign.configureApiKey';
                 
                 if (specificModel) {
-                    if (specificModel.includes('/')) {
+                    // First check if this matches the custom model configuration
+                    const customModelName = config.get<string>('customModelName');
+                    const hasCustomApiConfig = config.get<string>('customApiUrl') && 
+                                               config.get<string>('customApiKey') && 
+                                               customModelName;
+                    
+                    // If custom API is configured and the model matches, use custom provider
+                    if (hasCustomApiConfig && specificModel === customModelName) {
+                        effectiveProvider = 'custom';
+                    } else if (specificModel.includes('/')) {
                         effectiveProvider = 'openrouter';
                     } else if (specificModel.startsWith('claude-')) {
                         effectiveProvider = 'anthropic';
                     } else if (specificModel.startsWith('gpt-')) {
                         effectiveProvider = 'openai';
-                    } else if (specificModel === 'custom-model' || effectiveProvider === 'custom') {
+                    } else if (specificModel === 'custom-model' || provider === 'custom') {
                         effectiveProvider = 'custom';
                     } else {
-                        // Check if this is actually a custom model by comparing with customModelName
-                        const customModelName = config.get<string>('customModelName');
-                        if (effectiveProvider === 'custom' || (customModelName && specificModel === customModelName)) {
-                            effectiveProvider = 'custom';
-                        } else {
-                            effectiveProvider = 'openai';
-                        }
+                        effectiveProvider = 'openai';
                     }
                 }
                 

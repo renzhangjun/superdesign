@@ -143,7 +143,7 @@ export class CustomAgentService implements AgentService {
                     throw new Error('Custom model name not configured. Please run "Configure Custom API" command.');
                 }
                 
-                this.outputChannel.appendLine(`Custom API URL found: ${customApiUrl}`);
+                this.outputChannel.appendLine(`Custom API URL found: ${customApiUrl.substring(0, 20)}...`);
                 this.outputChannel.appendLine(`Custom API key found: ${customApiKey.substring(0, 12)}...`);
                 this.outputChannel.appendLine(`Custom model name: ${customModelName}`);
                 
@@ -1082,7 +1082,19 @@ I've created the html design, please reveiw and let me know if you need any chan
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
             
-            const response = await fetch(`${apiUrl}/models`, {
+            // 处理不同的API端点格式
+            let healthCheckUrl = apiUrl;
+            if (apiUrl.endsWith('/messages')) {
+                // 如果是messages端点，尝试使用父路径的models端点
+                healthCheckUrl = apiUrl.replace('/messages', '/models');
+            } else if (!apiUrl.endsWith('/models')) {
+                // 如果不是以/models结尾，添加/models
+                healthCheckUrl = apiUrl.endsWith('/') ? apiUrl + 'models' : apiUrl + '/models';
+            }
+            
+            this.outputChannel.appendLine(`Health check URL: ${healthCheckUrl}`);
+            
+            const response = await fetch(healthCheckUrl, {
                 method: 'GET',
                 headers: {
                     'Authorization': `Bearer ${apiKey}`,
@@ -1098,6 +1110,32 @@ I've created the html design, please reveiw and let me know if you need any chan
                 return true;
             } else {
                 this.outputChannel.appendLine(`API health check failed with status: ${response.status}`);
+                // 如果是404，尝试发送一个简单的POST请求到原始URL
+                if (response.status === 404 && apiUrl !== healthCheckUrl) {
+                    this.outputChannel.appendLine('Trying fallback health check with POST request...');
+                    try {
+                        const fallbackResponse = await fetch(apiUrl, {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${apiKey}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                model: 'test',
+                                messages: [{ role: 'user', content: 'test' }],
+                                max_tokens: 1
+                            }),
+                            signal: controller.signal
+                        });
+                        
+                        if (fallbackResponse.ok || fallbackResponse.status === 400 || fallbackResponse.status === 422) {
+                            this.outputChannel.appendLine('Fallback health check passed');
+                            return true;
+                        }
+                    } catch (fallbackError) {
+                        this.outputChannel.appendLine(`Fallback health check failed: ${fallbackError}`);
+                    }
+                }
                 return false;
             }
         } catch (error) {
